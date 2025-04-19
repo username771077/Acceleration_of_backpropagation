@@ -27,7 +27,7 @@ The suite includes tools for:
 * **pip:** Python package installer.
 * **NVIDIA GPU:** CUDA-enabled GPU is required. Triton performance benefits significantly from newer architectures (Ampere/Hopper, Compute Capability 7.0+ recommended).
 * **CUDA Toolkit:** Must be installed and compatible with your PyTorch and Triton versions. Check the PyTorch [website](https://pytorch.org/get-started/locally/) for compatibility.
-* **(Optional) DropBP:** For the `compare_methods.py` script, install `dropbp` (`pip install dropbp`) if you wish to include it in the comparison.
+* **(Optional) DropBP:** For the `compare_methods.py` script, install `dropbp` if you wish to include it in the comparison.
 
 ---
 
