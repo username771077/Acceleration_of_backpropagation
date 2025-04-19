@@ -179,7 +179,6 @@ def replace_layers_with_triton_sparse(model: PreTrainedModel, layers_to_modify: 
 print("Custom (Sparse Method using imported Triton) definitions complete.")
 print("-" * 40)
 
-
 def add_dropbp_to_bert_layer(layer, config, seq_length):
     if not DROPBP_AVAILABLE: return
     if not isinstance(layer, BertLayer): print(f"Warning: Expected BertLayer, got {type(layer)}. Skipping DropBP."); return
@@ -306,72 +305,6 @@ def evaluate_accuracy(model, eval_dataloader, device, task_name):
     model.train()
     try: eval_metric = metric.compute(predictions=all_preds, references=all_labels); accuracy = eval_metric['accuracy']; return accuracy
     except Exception as e: print(f"Error computing metric for {task_name}: {e}"); return 0.0
-
-def measure_latency(model: nn.Module, input_batch: dict, num_repeats: int = 10, num_warmup: int = 3, task_name: str = None):
-    if not torch.cuda.is_available(): raise RuntimeError("CUDA required for latency measurement.")
-    device = next(model.parameters()).device
-    is_regression = (task_name == 'stsb')
-
-    try:
-        input_batch_gpu = {k: v.to(device) for k, v in input_batch.items() if isinstance(v, torch.Tensor)}
-        if 'labels' not in input_batch_gpu:
-            print("Warning: 'labels' not found in batch for latency measurement backward pass.")
-            input_batch_gpu['labels'] = torch.zeros(input_batch_gpu['input_ids'].shape[0], dtype=torch.long if not is_regression else torch.float, device=device)
-    except Exception as e:
-        print(f"Error moving batch to GPU for latency measurement: {e}")
-        return float('nan'), float('nan')
-
-    forward_times = []; backward_times = []
-    loss_fn = nn.MSELoss() if is_regression else nn.CrossEntropyLoss()
-
-    model.eval()
-    for _ in range(num_warmup):
-        try:
-            with torch.no_grad(): _ = model(**input_batch_gpu)
-            model.train()
-            outputs = model(**input_batch_gpu)
-            logits = outputs.logits; labels = input_batch_gpu['labels']
-            if is_regression: loss = loss_fn(logits.squeeze(-1), labels.float())
-            else: loss = loss_fn(logits.view(-1, model.config.num_labels), labels.view(-1).long())
-            loss.backward()
-            model.zero_grad(set_to_none=True); model.eval()
-        except Exception as e:
-            print(f"Latency Warmup Exception: {e}"); traceback.print_exc()
-            return float('nan'), float('nan')
-
-    torch.cuda.synchronize()
-
-    for i in range(num_repeats):
-        try:
-            model.eval()
-            fwd_start = torch.cuda.Event(enable_timing=True); fwd_end = torch.cuda.Event(enable_timing=True)
-            fwd_start.record()
-            with torch.no_grad(): outputs = model(**input_batch_gpu)
-            fwd_end.record(); torch.cuda.synchronize()
-            forward_times.append(fwd_start.elapsed_time(fwd_end))
-
-            model.train()
-            outputs = model(**input_batch_gpu)
-            logits = outputs.logits; labels = input_batch_gpu['labels']
-            if is_regression: loss = loss_fn(logits.squeeze(-1), labels.float())
-            else: loss = loss_fn(logits.view(-1, model.config.num_labels), labels.view(-1).long())
-            torch.cuda.synchronize()
-
-            bwd_start = torch.cuda.Event(enable_timing=True); bwd_end = torch.cuda.Event(enable_timing=True)
-            bwd_start.record()
-            loss.backward()
-            bwd_end.record(); torch.cuda.synchronize()
-            backward_times.append(bwd_start.elapsed_time(bwd_end))
-
-            model.zero_grad(set_to_none=True); model.eval()
-
-        except Exception as e:
-            print(f"Latency Measurement Exception (Repeat {i+1}): {e}"); traceback.print_exc()
-            forward_times.append(float('nan')); backward_times.append(float('nan'))
-
-    avg_fwd = np.nanmean(forward_times) if forward_times else 0.0
-    avg_bwd = np.nanmean(backward_times) if backward_times else 0.0
-    return avg_fwd, avg_bwd
 
 def plot_accuracy_comparison(task_name, results, output_dir, model_name, n_dense, drop_rate):
     plt.figure(figsize=(10, 6))
@@ -501,79 +434,18 @@ def run_accuracy_comparison(config):
     print(f"GLUE SL: {config.seq_length}")
     print(f"BS: {config.batch_size}, Steps: {config.num_train_steps}, Eval Every: {config.eval_every}, LR: {config.learning_rate}")
     print(f"Number of Runs per Method (Accuracy): {config.num_runs}")
-    print(f"Latency Measurement Repeats: {config.latency_repeats}, Warmup: {config.latency_warmup}")
-
 
     LinearFunctionAccelarate._N_dense_rows_to_keep = config.N_dense_rows_to_keep
     print(f"Using Sparse Method (Triton): N_dense = {config.N_dense_rows_to_keep}")
+    print("⚠️ WARNING: Sparse method uses heuristic gradient approx. & NO weight updates for modified layers!")
     if DROPBP_AVAILABLE: print(f"Using DropBP Method (Initial Rate: {config.dropbp_initial_drop_rate}).")
     else: print("DropBP library not found, skipping DropBP comparison.")
 
     try: tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     except Exception as e: print(f"Load Tokenizer Error: {e}"); traceback.print_exc(); return
 
-    latency_results = []
-
     for task in config.tasks:
         print(f"\n{'='*25} Task: {task.upper()} {'='*25}")
-
-        print(f"\n--- Measuring Latency for Task: {task} ---")
-        task_latency = {"Task": task}
-        latency_dataloader = prepare_glue_data(task, tokenizer, config.batch_size, config.seq_length, split_name='validation')
-        if latency_dataloader is None:
-            print(f"Could not load data for latency measurement of task {task}. Skipping latency.")
-            sample_batch = None
-        else:
-            try: sample_batch = next(iter(latency_dataloader))
-            except StopIteration:
-                print(f"Validation dataloader for {task} is empty. Skipping latency.")
-                sample_batch = None
-
-        if sample_batch:
-            methods_for_latency = ["Original", "Sparse"]
-            if DROPBP_AVAILABLE: methods_for_latency.append("DropBP")
-
-            for method_name in methods_for_latency:
-                clear_gpu_cache(); model_latency = None; model_base_latency = None
-                print(f"  Measuring latency for: {method_name}")
-                try:
-                    model_config_latency = AutoConfig.from_pretrained(config.model_name, trust_remote_code=True)
-                    task_labels = {"cola": 2, "sst2": 2, "mrpc": 2, "qqp": 2, "mnli": 3, "qnli": 2, "rte": 2, "wnli": 2, "ax": 3}
-                    num_labels = 1 if task == 'stsb' else task_labels.get(task, 2)
-                    model_config_latency.num_labels = num_labels
-                    if getattr(model_config_latency, "id2label", None) is None: model_config_latency.id2label = {i: f"LABEL_{i}" for i in range(model_config_latency.num_labels)}; model_config_latency.label2id = {v: k for k, v in model_config_latency.id2label.items()}
-
-                    model_latency = AutoModelForSequenceClassification.from_pretrained(config.model_name, config=model_config_latency, trust_remote_code=True)
-
-                    if method_name == "Sparse":
-                        if not SPARSE_METHOD_TRITON_AVAILABLE:
-                             print(f"Skipping Sparse latency as Triton wrapper import failed.")
-                             task_latency[f"{method_name} Forward (ms)"] = float('nan')
-                             task_latency[f"{method_name} Backward (ms)"] = float('nan')
-                             continue
-                        model_latency = replace_layers_with_triton_sparse(model_latency, layers_to_modify=config.layers_to_modify);
-                    elif method_name == "DropBP":
-                        model_latency = add_dropbp_to_model(model_latency, config.seq_length)
-
-                    model_latency.to(device).eval()
-
-                    fwd_ms, bwd_ms = measure_latency(
-                        model_latency, sample_batch, config.latency_repeats, config.latency_warmup, task_name=task
-                    )
-                    task_latency[f"{method_name} Forward (ms)"] = fwd_ms
-                    task_latency[f"{method_name} Backward (ms)"] = bwd_ms
-                    print(f"    {method_name} - Fwd: {fwd_ms:.3f} ms, Bwd: {bwd_ms:.3f} ms")
-
-                except Exception as e:
-                    print(f"Error during latency measurement for {method_name} on {task}: {e}")
-                    traceback.print_exc()
-                    task_latency[f"{method_name} Forward (ms)"] = float('nan')
-                    task_latency[f"{method_name} Backward (ms)"] = float('nan')
-                finally:
-                     del model_latency; del model_base_latency; clear_gpu_cache()
-
-            latency_results.append(task_latency)
-
 
         task_accuracy_run_results = {
             "Original": {'steps': None, 'all_accuracies': [], 'mean_accuracies': [], 'std_accuracies': []},
@@ -659,61 +531,7 @@ def run_accuracy_comparison(config):
             config.N_dense_rows_to_keep, config.dropbp_initial_drop_rate
         )
 
-    if latency_results:
-        print("\n" + "="*60)
-        print("--- Performance Comparison (Latency) ---")
-        print("="*60)
-        perf_df = pd.DataFrame(latency_results)
-
-        methods = ["Sparse"]
-        if DROPBP_AVAILABLE: methods.append("DropBP")
-
-        for method in methods:
-            fwd_col = f"{method} Forward (ms)"
-            bwd_col = f"{method} Backward (ms)"
-            if fwd_col in perf_df.columns and "Original Forward (ms)" in perf_df.columns:
-                perf_df[f"{method} Fwd Speedup"] = pd.to_numeric(perf_df["Original Forward (ms)"], errors='coerce') / pd.to_numeric(perf_df[fwd_col], errors='coerce')
-            else: perf_df[f"{method} Fwd Speedup"] = np.nan
-            if bwd_col in perf_df.columns and "Original Backward (ms)" in perf_df.columns:
-                perf_df[f"{method} Bwd Speedup"] = pd.to_numeric(perf_df["Original Backward (ms)"], errors='coerce') / pd.to_numeric(perf_df[bwd_col], errors='coerce')
-            else: perf_df[f"{method} Bwd Speedup"] = np.nan
-
-        float_cols = [col for col in perf_df.columns if '(ms)' in col]
-        speedup_cols = [col for col in perf_df.columns if 'Speedup' in col]
-
-        for col in float_cols: perf_df[col] = pd.to_numeric(perf_df[col], errors='coerce').apply(lambda x: f"{x:.3f}" if pd.notnull(x) else 'NaN')
-        for col in speedup_cols: perf_df[col] = pd.to_numeric(perf_df[col], errors='coerce').apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else '-')
-
-        col_order = ["Task", "Original Forward (ms)", "Original Backward (ms)"]
-        if "Sparse Forward (ms)" in perf_df.columns:
-            col_order.extend(["Sparse Forward (ms)", "Sparse Fwd Speedup", "Sparse Backward (ms)", "Sparse Bwd Speedup"])
-        if DROPBP_AVAILABLE and "DropBP Forward (ms)" in perf_df.columns:
-            col_order.extend(["DropBP Forward (ms)", "DropBP Fwd Speedup", "DropBP Backward (ms)", "DropBP Bwd Speedup"])
-        col_order = [col for col in col_order if col in perf_df.columns]
-        perf_df = perf_df[col_order]
-
-        print(perf_df.to_markdown(index=False))
-
-        if config.output_dir:
-            try:
-                os.makedirs(config.output_dir, exist_ok=True); safe_model_name = config.model_name.replace('/', '_')
-                latency_filename = f"{safe_model_name}_SparseN{config.N_dense_rows_to_keep}_DropBP{config.dropbp_initial_drop_rate}_latency.csv"
-                latency_path = os.path.join(config.output_dir, latency_filename)
-                perf_df_numeric = pd.DataFrame(latency_results)
-                for method in methods:
-                     if f"{method} Forward (ms)" in perf_df_numeric.columns and "Original Forward (ms)" in perf_df_numeric.columns:
-                         perf_df_numeric[f"{method} Fwd Speedup"] = pd.to_numeric(perf_df_numeric["Original Forward (ms)"], errors='coerce') / pd.to_numeric(perf_df_numeric[f"{method} Forward (ms)"], errors='coerce')
-                     if f"{method} Backward (ms)" in perf_df_numeric.columns and "Original Backward (ms)" in perf_df_numeric.columns:
-                         perf_df_numeric[f"{method} Bwd Speedup"] = pd.to_numeric(perf_df_numeric["Original Backward (ms)"], errors='coerce') / pd.to_numeric(perf_df_numeric[f"{method} Backward (ms)"], errors='coerce')
-                perf_df_numeric = perf_df_numeric[col_order]
-                perf_df_numeric.to_csv(latency_path, index=False, float_format='%.4f')
-                print(f"\nLatency results saved to {latency_path}")
-            except Exception as e: print(f"Error saving latency results: {e}")
-    else:
-        print("\nNo latency results were generated.")
-
-
-    print("\n--- Accuracy & Speed Comparison Run Finished ---")
+    print("\n--- Accuracy Comparison Run Finished ---")
 
 
 if __name__ == "__main__":
@@ -723,14 +541,12 @@ if __name__ == "__main__":
     config.tasks = ["sst2", "mrpc", "rte", "cola", "qnli", "qqp", "mnli"]
     config.batch_size = 16
     config.seq_length = 128
-    config.output_dir = f"./results_accuracy_speed_{config.model_name.split('/')[-1]}"
+    config.output_dir = f"./results_accuracy_{config.model_name.split('/')[-1]}" # Renamed dir
     config.num_train_steps = 200
     config.learning_rate = 2e-5
     config.eval_every = 40
     config.num_runs = 3
     config.random_seed_base = 42
-    config.latency_repeats = 10
-    config.latency_warmup = 3
     config.N_dense_rows_to_keep = 50
     config.layers_to_modify = None
     config.dropbp_initial_drop_rate = 0.15
@@ -738,14 +554,18 @@ if __name__ == "__main__":
     DO_COMPARISON_RUN = True
 
     if DO_COMPARISON_RUN:
-        print("\n === Starting Accuracy & Speed Comparison Run (Original vs Sparse vs DropBP) ===\n")
+        print("\n === Starting Accuracy Comparison Run (Original vs Sparse vs DropBP) ===\n")
         print("="*60)
         print(f" >> Comparing: Original (Blue), Sparse (Green), DropBP (Red)")
         print(f" >> Model: {config.model_name}")
         print(f" >> Tasks: {config.tasks}")
         print(f" >> Steps: {config.num_train_steps}, Eval Freq: {config.eval_every}")
         print(f" >> Number of Runs (Accuracy): {config.num_runs}")
+        print(" >> Plotting Validation Accuracy vs Steps (with error bars).")
+        print(" >> NOTE: Sparse method does NOT update weights in modified layers!")
         runtime_multiplier = config.num_runs * (1 + (1 if DROPBP_AVAILABLE and SPARSE_METHOD_TRITON_AVAILABLE else 0))
+        print(f" !!! This will take roughly {config.num_runs}x Training Time !!!")
+        print(f" !!! Estimated runtime could be significant depending on GPU and #Tasks !!!")
         print("="*60)
         time.sleep(5)
         clear_gpu_cache()
