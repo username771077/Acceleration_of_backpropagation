@@ -33,7 +33,6 @@ This project benchmarks a custom sparse backward pass implementation for Transfo
 
 1.  **Clone the Repository:**
     ```bash
-    git clone <your-repository-url> # Replace with your repo URL
     cd <repository-directory>
     ```
 
