@@ -2,8 +2,6 @@
 
 This project benchmarks a custom sparse backward pass implementation for Transformer Feed-Forward Network (FFN) layers using PyTorch and [Triton](https://github.com/openai/triton). It specifically implements and evaluates a 'fixed slice' method where only the top N rows of the gradient tensor (`dY`) are computationally involved in the `dX = dY @ W` calculation during the backward pass.
 
-**⚠️ Important Warning:** The 'sparse method' implemented here **aggressively truncates gradient information** by only considering the top `N` rows based on their initial layout in the flattened tensor. This is **highly likely to be numerically incorrect** for actual model training and will likely prevent model convergence. Its purpose in this project is *purely* to benchmark the potential speedup of such a restricted kernel *if* such sparsity could be correctly achieved or justified by other means (which is not the case here). **Do not use this specific backward pass implementation for actual model training.**
-
 ---
 
 ## 🚀 Features
