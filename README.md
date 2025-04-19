@@ -5,7 +5,7 @@ This project explores and benchmarks a custom sparse backward pass implementatio
 The suite includes tools for:
 * Latency benchmarking of the sparse Triton kernel against the original model.
 * Sparsity analysis and gradient visualization.
-* Comparative analysis of accuracy trajectories and latency between the original model, the sparse Triton method, and optionally the DropBP technique.
+* Comparative analysis of accuracy trajectories and latency between the original model, the sparse Triton method, and optionally the DropBP technique (if you want to run comapre_methods.py you'll have to install it via their github).
 
 ---
 
@@ -14,7 +14,7 @@ The suite includes tools for:
 * **Custom Triton Kernel:** A highly optimized `fixed_slice_matmul_kernel` written in Triton for the sparse backward computation, designed for potential speedups.
 * **Latency Benchmarking:** Tools to compare the forward and backward pass latency of standard Hugging Face models vs. models using the custom sparse Triton kernel (`main.py`).
 * **Sparsity Analysis & Visualization:** Script (`sparsity_plotter.py`) to analyze gradient sparsity patterns and generate insightful visualizations (heatmaps, histograms).
-* **Accuracy & Speed Comparison:** Comprehensive script (`compare_methods.py`) to compare accuracy trajectories (across multiple runs with error bars) and latency between Original, Sparse (Triton), and optionally DropBP methods during fine-tuning on GLUE tasks.
+* **Accuracy & Speed Comparison:** Comprehensive script (`compare_methods.py`) to compare accuracy trajectories (across multiple runs with error bars) andoptionally DropBP methods during fine-tuning on GLUE tasks.
 * **Model Flexibility:** Supports analysis on different Transformer architectures like **BERT** and **RoBERTa**, automatically adapting layer replacement logic.
 * **Configurable:** Easily change parameters within each script (model name, tasks, batch size, sequence length, sparse method parameters, layers to modify, etc.).
 * **Data Handling:** Uses the `datasets` library to download and preprocess GLUE task data automatically.
@@ -35,7 +35,7 @@ The suite includes tools for:
 
 1.  **Clone the Repository:**
     ```bash
-    # git clone <your-repository-url> # If applicable
+    # git clone
     cd <repository-directory>
     ```
 
@@ -59,10 +59,8 @@ The suite includes tools for:
     ```bash
     pip install -r requirements.txt
     # You might also need: pip install matplotlib evaluate scikit-learn scipy # If not already included
-    # Optional: pip install dropbp
+    # Optional: install dropbp via their github
     ```
-    *Note: Depending on your system and CUDA setup, you might need to install PyTorch and Triton separately first, following instructions from their official websites.*
-
 ---
 
 ## ▶️ Usage
